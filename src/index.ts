@@ -33,7 +33,6 @@ import {
   getAllTasks,
   getMessagesSince,
   getNewMessages,
-  getRegisteredGroup,
   getRouterState,
   initDatabase,
   setRegisteredGroup,
@@ -60,6 +59,10 @@ import {
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
+import { loadTelos } from './telos.js';
+import { loadMemory, createDailyNote } from './memory/index.js';
+import { loadRules } from './steering.js';
+import { getSteeringRules } from './db.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -475,6 +478,26 @@ async function main(): Promise<void> {
   initDatabase();
   logger.info('Database initialized');
   loadState();
+
+  // Initialize PAI systems
+  const telosContext = loadTelos();
+  logger.info({ telosFiles: telosContext.files.length }, 'TELOS loaded');
+  const memoryEntries = loadMemory();
+  createDailyNote();
+  logger.info({ memoryEntries: memoryEntries.length }, 'Memory loaded');
+
+  const dbRules = getSteeringRules('active');
+  loadRules(dbRules.map(r => ({
+    id: r.id,
+    condition: r.condition,
+    action: r.action,
+    source: r.source as 'failure' | 'manual',
+    status: r.status as 'proposed' | 'approved' | 'rejected' | 'active',
+    createdAt: new Date(r.created_at),
+    approvedAt: r.approved_at ? new Date(r.approved_at) : undefined,
+  })));
+  logger.info('Steering rules loaded');
+
   restoreRemoteControl();
 
   // Start credential proxy (containers route API calls through this)

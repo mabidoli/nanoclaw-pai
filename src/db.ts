@@ -82,6 +82,68 @@ function createSchema(database: Database.Database): void {
       container_config TEXT,
       requires_trigger INTEGER DEFAULT 1
     );
+
+    CREATE TABLE IF NOT EXISTS signals (
+      id TEXT PRIMARY KEY,
+      type TEXT NOT NULL,
+      value TEXT NOT NULL,
+      confidence REAL,
+      comment TEXT,
+      group_folder TEXT,
+      session_id TEXT,
+      timestamp TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS steering_rules (
+      id TEXT PRIMARY KEY,
+      condition TEXT NOT NULL,
+      action TEXT NOT NULL,
+      source TEXT NOT NULL,
+      status TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      approved_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS embeddings (
+      id TEXT PRIMARY KEY,
+      memory_id TEXT NOT NULL,
+      vector BLOB NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS entities (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL,
+      properties_json TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS relationships (
+      id TEXT PRIMARY KEY,
+      from_id TEXT NOT NULL,
+      to_id TEXT NOT NULL,
+      type TEXT NOT NULL,
+      FOREIGN KEY (from_id) REFERENCES entities(id),
+      FOREIGN KEY (to_id) REFERENCES entities(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS checkpoints (
+      id TEXT PRIMARY KEY,
+      group_folder TEXT NOT NULL,
+      state_json TEXT NOT NULL,
+      timestamp TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS modifications (
+      id TEXT PRIMARY KEY,
+      type TEXT NOT NULL,
+      diff TEXT NOT NULL,
+      rationale TEXT NOT NULL,
+      baseline_score REAL,
+      verified_score REAL,
+      status TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -632,6 +694,139 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
     };
   }
   return result;
+}
+
+// --- PAI Signal operations ---
+
+export function insertSignal(signal: {
+  id: string;
+  type: string;
+  value: string;
+  confidence?: number;
+  comment?: string;
+  group_folder?: string;
+  session_id?: string;
+  timestamp: string;
+}): void {
+  db.prepare(`INSERT OR REPLACE INTO signals (id, type, value, confidence, comment, group_folder, session_id, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(signal.id, signal.type, signal.value, signal.confidence ?? null, signal.comment ?? null, signal.group_folder ?? null, signal.session_id ?? null, signal.timestamp);
+}
+
+export function getSignals(groupFolder?: string, limit: number = 100): Array<{id: string; type: string; value: string; confidence: number | null; comment: string | null; group_folder: string | null; session_id: string | null; timestamp: string}> {
+  if (groupFolder) {
+    return db.prepare('SELECT * FROM signals WHERE group_folder = ? ORDER BY timestamp DESC LIMIT ?').all(groupFolder, limit) as any[];
+  }
+  return db.prepare('SELECT * FROM signals ORDER BY timestamp DESC LIMIT ?').all(limit) as any[];
+}
+
+// --- PAI Steering Rule operations ---
+
+export function insertSteeringRule(rule: {
+  id: string;
+  condition: string;
+  action: string;
+  source: string;
+  status: string;
+  created_at: string;
+  approved_at?: string;
+}): void {
+  db.prepare(`INSERT OR REPLACE INTO steering_rules (id, condition, action, source, status, created_at, approved_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+    .run(rule.id, rule.condition, rule.action, rule.source, rule.status, rule.created_at, rule.approved_at ?? null);
+}
+
+export function getSteeringRules(status?: string): Array<{id: string; condition: string; action: string; source: string; status: string; created_at: string; approved_at: string | null}> {
+  if (status) {
+    return db.prepare('SELECT * FROM steering_rules WHERE status = ? ORDER BY created_at DESC').all(status) as any[];
+  }
+  return db.prepare('SELECT * FROM steering_rules ORDER BY created_at DESC').all() as any[];
+}
+
+export function updateSteeringRuleStatus(id: string, status: string, approvedAt?: string): void {
+  if (approvedAt) {
+    db.prepare('UPDATE steering_rules SET status = ?, approved_at = ? WHERE id = ?').run(status, approvedAt, id);
+  } else {
+    db.prepare('UPDATE steering_rules SET status = ? WHERE id = ?').run(status, id);
+  }
+}
+
+// --- PAI Embedding operations ---
+
+export function insertEmbedding(id: string, memoryId: string, vector: Buffer, createdAt: string): void {
+  db.prepare('INSERT OR REPLACE INTO embeddings (id, memory_id, vector, created_at) VALUES (?, ?, ?, ?)').run(id, memoryId, vector, createdAt);
+}
+
+export function getEmbeddings(): Array<{id: string; memory_id: string; vector: Buffer; created_at: string}> {
+  return db.prepare('SELECT * FROM embeddings').all() as any[];
+}
+
+// --- PAI Entity operations ---
+
+export function insertEntity(id: string, name: string, type: string, propertiesJson?: string): void {
+  db.prepare('INSERT OR REPLACE INTO entities (id, name, type, properties_json) VALUES (?, ?, ?, ?)').run(id, name, type, propertiesJson ?? null);
+}
+
+export function getEntities(): Array<{id: string; name: string; type: string; properties_json: string | null}> {
+  return db.prepare('SELECT * FROM entities').all() as any[];
+}
+
+export function insertRelationship(id: string, fromId: string, toId: string, type: string): void {
+  db.prepare('INSERT OR REPLACE INTO relationships (id, from_id, to_id, type) VALUES (?, ?, ?, ?)').run(id, fromId, toId, type);
+}
+
+export function getRelationships(entityId?: string): Array<{id: string; from_id: string; to_id: string; type: string}> {
+  if (entityId) {
+    return db.prepare('SELECT * FROM relationships WHERE from_id = ? OR to_id = ?').all(entityId, entityId) as any[];
+  }
+  return db.prepare('SELECT * FROM relationships').all() as any[];
+}
+
+// --- PAI Checkpoint operations ---
+
+export function insertCheckpoint(id: string, groupFolder: string, stateJson: string, timestamp: string): void {
+  db.prepare('INSERT OR REPLACE INTO checkpoints (id, group_folder, state_json, timestamp) VALUES (?, ?, ?, ?)').run(id, groupFolder, stateJson, timestamp);
+}
+
+export function getCheckpoint(id: string): {id: string; group_folder: string; state_json: string; timestamp: string} | undefined {
+  return db.prepare('SELECT * FROM checkpoints WHERE id = ?').get(id) as any;
+}
+
+export function getLatestCheckpoint(groupFolder: string): {id: string; group_folder: string; state_json: string; timestamp: string} | undefined {
+  return db.prepare('SELECT * FROM checkpoints WHERE group_folder = ? ORDER BY timestamp DESC LIMIT 1').get(groupFolder) as any;
+}
+
+// --- PAI Modification operations ---
+
+export function insertModification(mod: {
+  id: string;
+  type: string;
+  diff: string;
+  rationale: string;
+  baseline_score?: number;
+  verified_score?: number;
+  status: string;
+  created_at: string;
+}): void {
+  db.prepare('INSERT OR REPLACE INTO modifications (id, type, diff, rationale, baseline_score, verified_score, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(mod.id, mod.type, mod.diff, mod.rationale, mod.baseline_score ?? null, mod.verified_score ?? null, mod.status, mod.created_at);
+}
+
+export function getModification(id: string): {id: string; type: string; diff: string; rationale: string; baseline_score: number | null; verified_score: number | null; status: string; created_at: string} | undefined {
+  return db.prepare('SELECT * FROM modifications WHERE id = ?').get(id) as any;
+}
+
+export function updateModificationStatus(id: string, status: string, verifiedScore?: number): void {
+  if (verifiedScore !== undefined) {
+    db.prepare('UPDATE modifications SET status = ?, verified_score = ? WHERE id = ?').run(status, verifiedScore, id);
+  } else {
+    db.prepare('UPDATE modifications SET status = ? WHERE id = ?').run(status, id);
+  }
+}
+
+export function getModifications(status?: string): Array<{id: string; type: string; diff: string; rationale: string; baseline_score: number | null; verified_score: number | null; status: string; created_at: string}> {
+  if (status) {
+    return db.prepare('SELECT * FROM modifications WHERE status = ? ORDER BY created_at DESC').all(status) as any[];
+  }
+  return db.prepare('SELECT * FROM modifications ORDER BY created_at DESC').all() as any[];
 }
 
 // --- JSON migration ---
